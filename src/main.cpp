@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 
+    
 #include "window.hpp"
 #include "ReadLuaConfig.hpp"
 #include "debug.hpp"
@@ -18,6 +19,8 @@ int yres;
 float enlarge;
 LuaConfig settings;
 unsigned int *sharedBuffer;
+char LuaFilePath[256];
+unsigned int LuaState=0;
 
 void ExecLua(char * filename);
 void CreateConsole();
@@ -29,16 +32,51 @@ int LuaGetWidth(lua_State *L);
 int LuaGetHeight(lua_State *L);
 void ExecLua(char * filename);
 
+int toQuit=0;
 
+void LuaHookFunc(lua_State *L, lua_Debug *ar)
+{
+    if(ar->event == LUA_HOOKLINE)
+    {
+        if(toQuit==1)
+        {
+            luaL_error(L, "USER STOPPED\n");
+            toQuit=0;
+        }
+    }
+}
 
+DWORD WINAPI LuaExecThread(LPVOID lpParam)
+{
+    while(1)
+    {
+        if(LuaState==1)
+        {
+            ExecLua(LuaFilePath);
+            LuaState=0;
+        }
+        else
+        {
+            Sleep(10);
+        }
+    }
+   
+}
+
+BOOL CtrlHandler(DWORD fdwCtrlType)
+{
+    return true;
+}
 void CreateConsole()
 {
     if( !AllocConsole() ) MessageBox(NULL, TEXT("create console failed!"), NULL, 0);
     SetConsoleTitle(TEXT("stdout"));
     freopen(TEXT("CONOUT$"),TEXT("w"), stdout);
+    freopen(TEXT("CONIN$"),TEXT("r"), stdin);
     HWND hwnd = GetConsoleWindow();
     HMENU hMenu = GetSystemMenu(hwnd,false);
     DeleteMenu(hMenu,SC_CLOSE,MF_BYCOMMAND);
+    SetConsoleCtrlHandler((PHANDLER_ROUTINE)CtrlHandler, TRUE );  
 }
 
 unsigned int* CreateSharedMemory(const TCHAR* szName,int size)
@@ -66,14 +104,10 @@ static LRESULT CALLBACK WndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
             count = DragQueryFile(hDropInfo, 0xFFFFFFFF, NULL, 0);
             if( count==1 )
             {
-                //however, it may be better to run it in a new thread! 
-                char filePath[256];
-                DragQueryFile(hDropInfo, 0, filePath, sizeof(filePath));
+                DragQueryFile(hDropInfo, 0, LuaFilePath, sizeof(LuaFilePath));
                 DragFinish(hDropInfo);
-                DBGPRINT("Drag in file %s\n",filePath);
-                DBGPRINT("start execute script\n");
-                ExecLua(filePath);
-                DBGPRINT("finished execute script\n");
+                DBGPRINT("Drag in file %s\n",LuaFilePath);
+                LuaState=1;
             }
             break;
         }
@@ -84,6 +118,7 @@ static LRESULT CALLBACK WndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
             HMENU m = CreatePopupMenu();
             AppendMenu(m, MF_STRING, 0x8001,"Clear");
             AppendMenu(m, MF_STRING, 0x8002,"Export to bmp file");
+            AppendMenu(m, MF_STRING, 0x8003,"Stop Lua");
             AppendMenu(hMainMenu, MF_STRING | MF_POPUP, (UINT)m, "main");
             TrackPopupMenu(m, TPM_VERTICAL|TPM_TOPALIGN, p.x, p.y, 0, hWnd, NULL);
             DestroyMenu(m);
@@ -151,6 +186,12 @@ static LRESULT CALLBACK WndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                     fwrite(sharedBuffer, height*lineByte, 1, fp);
                     
                     fclose(fp);
+                    break;
+                }
+                case 0x8003:
+                {
+                    toQuit = 1;
+                    break;
                 }
             }
             break;
@@ -206,15 +247,25 @@ int LuaGetHeight(lua_State *L)
     return 1;
 }
 
+int LuaSleep(lua_State *L)
+{
+    Sleep((int)luaL_checknumber(L, 1));
+    return 1;
+}
 void ExecLua(char * filename)
 {
+    printf("Start Run Lua script\n");
+    toQuit = 0;
     lua_State *luastat;
     luastat = luaL_newstate();
     luaL_openlibs(luastat);
     
+    lua_sethook(luastat, &LuaHookFunc, LUA_MASKLINE, 0);
+     
     lua_register(luastat, "DrawPoint", LuaDrawPoint);
     lua_register(luastat, "GetWidth", LuaGetWidth);
     lua_register(luastat, "GetHeight", LuaGetHeight);
+    lua_register(luastat, "Sleep", LuaSleep);
     
     int error = luaL_dofile(luastat, filename);
     if(error)
@@ -224,7 +275,9 @@ void ExecLua(char * filename)
         lua_pop(luastat, 1);
     }
     lua_close(luastat);
+    printf("Finished Run Lua script\n");
 }
+
 
 int WINAPI WinMain( HINSTANCE instance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow )
 {
@@ -246,6 +299,10 @@ int WINAPI WinMain( HINSTANCE instance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     char title[100];
     snprintf(title,100,"screen x:%dy:%d X%f",xres,yres,enlarge);
     ScreenWindow->SetTitle(title);
+    
+    DWORD dwThread;
+    HANDLE hThread = CreateThread(NULL,0,LuaExecThread,(LPVOID)NULL,0,&dwThread);
+
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     while(running)
